@@ -1,7 +1,7 @@
 # Movie Recommendation System Overview
 
 ## Introduction
-This repository contains a movie recommendation system implemented in Python using collaborative filtering techniques. Collaborative filtering is a method commonly used in recommendation systems, where the system predicts a user's preferences based on the preferences of other users.
+This repository contains a hybrid movie recommendation system implemented in Python using collaborative filtering techniques. Collaborative filtering is a method commonly used in recommendation systems, where the system predicts a user's preferences based on the preferences of other users.
 
 ## Table of Contents
 1. [Requirements](#requirements)
@@ -25,7 +25,7 @@ Ensure you have the following Python libraries installed:
 
 ## Getting Started
 1. Clone the repository to your local machine.
-2. Install the required dependencies using `pip install -r requirements.txt`.
+2. Install the required dependencies.
 3. Run the main script to see the recommendation system in action.
 
 ## Data
@@ -52,7 +52,16 @@ The `calculateMetrics` function evaluates the recommendation system's performanc
 Results, including MAE, Precision, and Recall, are displayed in the console.
 
 ## Usage
-Modify the paths in the script to point to your dataset. Run the script to train the model, make recommendations, and evaluate performance.
+Run the script to train the model, make recommendations, and evaluate performance.The expected command to run the script is as follows:
+```python script_name.py <source> <path> <neighbors> <train-percentage>```
+
+   * **source:** Placeholder for the script source file.
+   * **path:** Placeholder for the path to the input data file.
+   * **neighbors:** Number of neighbors for similarity calculation.
+   * **train-percentage:** Percentage of the dataset to be used for training.
+     
+For example: ```python recommendation_script.py input_data.csv 5 0.8```
+
 
 ## Contributing
 Feel free to contribute by opening issues, proposing new features, or submitting pull requests.
