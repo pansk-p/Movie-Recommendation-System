@@ -1,212 +1,140 @@
-# In[1]:
 #make necesarry imports
+import sys
 import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import pairwise_distances
-from scipy.spatial.distance import squareform,pdist
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error as mae,precision_score,recall_score
-from scipy.sparse import csr_matrix
+from datetime import datetime
+from itertools import combinations
 
-global k, percent
-k = 20
-percent = 0.9   # percentage of train-test split
-
-#Read the data,preprocess it and split to train and test sets
-def data_init():
-    ratings = pd.read_csv("C:/Users/Panos/Desktop/data/ratings.csv", usecols = ['userId','movieId','rating'])
-    filtered_movies = ratings.groupby('movieId').filter(lambda x: x['movieId'].count()>5)
+def data_initialization(path, percentage):
+    ratings = pd.read_csv(path, usecols = ['userId','movieId','rating'])
+    filtered_movies = ratings[ratings['movieId'].map(ratings['movieId'].value_counts()) >= 5]
+    filtered_users = filtered_movies[filtered_movies['userId'].map(filtered_movies['userId'].value_counts()) >= 5]
     
-    
-    train, test = train_test_split(filtered_movies, 
-                                   train_size = percent,
+    train, test = train_test_split(filtered_users, 
+                                   train_size = percentage,
                                    test_size = 0.1,
-                                   random_state = 2,)
-
-    train = train.pivot(index='movieId',columns='userId',values='rating')
-    train.fillna(0,inplace=True)
-   
-    test = test.pivot(index='movieId',columns='userId',values='rating')
-    test.fillna(0,inplace=True)
+                                   random_state = 1)
+    #precalculate user mean and common users who rated all 2-movie combinations
+    users = train.groupby('movieId')['userId'].apply(list).to_dict()
+    counts = {(mov1, mov2): len(set(users[mov1]).intersection(users[mov2])) for mov1, mov2 in combinations(set(train['movieId']), 2)}
+    mean = train.groupby(by='userId', as_index=True)['rating'].mean() 
     
-    return train, test
-
-#This functions calls the chosen method to calculate the item similarity
-def calculate_simMatrix(matrix, mode):
-    if(mode == 1):
-        sim_matrix = jaccard(matrix)
-    elif(mode == 2):
-        sim_matrix = adjcosine(matrix)
-    else:
-        print("Type: 1 for jaccard , 2 for adjusted cosine!")   
-    return  matchIndicies(matrix, sim_matrix)
-
-#This function is used to compute jaccard similarity matrix for items
-def jaccard(matrix):
-      sim_matrix = 1 - pairwise_distances(matrix.T, metric = "hamming")
-      sim_matrix = pd.DataFrame(sim_matrix)
-      return sim_matrix
-
-#This function is used to compute adjusted cosine similarity matrix for items
-def adjcosine(matrix):
-    M_u = matrix.mean(axis=1)
-    item_mean_subtracted = matrix - M_u[:, None]
-    similarity_matrix = 1 - squareform(pdist(item_mean_subtracted.T, 'cosine'))
-    similarity_matrix = pd.DataFrame(similarity_matrix)
-    return similarity_matrix
-
-#This function match the indicies(row & column)from one matrix to another
-def matchIndicies(fromMatrix, toMatrix):
-    fromMatrix = fromMatrix.T
-    toMatrix.index = fromMatrix.index.copy()
-    sim_matrix = toMatrix.T
-    sim_matrix.index = fromMatrix.index.copy()
-    print("Similarity Matrix Calculated!\n")
-    return sim_matrix
+    train = train.pivot(index='movieId', columns='userId', values='rating')
+    test = test.pivot(index='movieId', columns='userId', values='rating')
+    predictions = pd.DataFrame(np.nan, index = test.index, columns = test.columns)
+    similarities = train.T.corr(method="pearson", min_periods=5)
+    similarities.replace(0.0, np.nan, inplace=True) 
+    return train, test, similarities, predictions, mean, counts
 
 #This function finds k similar items given the item_id and ratings matrix 
-def find_k_similar_items(item_id, simMatrix):
-    similarities = simMatrix[item_id].sort_values(ascending=False)[:k+1].values
-    indices = simMatrix[item_id].sort_values(ascending=False)[:k+1].index
-    
-    #print ('For user {0}, {1} most similar items for item {2}:\n'.format(user_id,k,item_id))
-    #for i in range(0, len(indices)):
-    #        if indices[i] == item_id:
-    #            continue;
-    #        else:
-               #print ('{0}: Item {1} :, with similarity of {2}'
-                #.format(i,indices[i], similarities[i]))
-    #            continue;
-    return similarities ,indices  
+def find_k_similar_items(item_id, similarity_matrix, neighbors):
+    similarities = similarity_matrix[item_id].dropna().sort_values(ascending=False)[:neighbors].values
+    indices = similarity_matrix[item_id].dropna().sort_values(ascending=False)[:neighbors].index
+    return similarities, indices  
 
+#This function finds k++ similar items given the item_id and ratings matrix 
+def find_kplus_similar_items(train, item_id, user_id, similarity_matrix, neighbors):
+    similarities = []
+    indices = []
+    temp_s = similarity_matrix[item_id].dropna().sort_values(ascending=False).values 
+    temp_i = similarity_matrix[item_id].dropna().sort_values(ascending=False).index
+    for i in range(0, len(temp_i)):   
+        if not np.isnan(train.loc[temp_i[i]][user_id]) and temp_i[i] != item_id and temp_s[i] >= 0.5:
+            similarities.append(temp_s[i])
+            indices.append(temp_i[i])
+            if len(indices) == neighbors: break     
+    return similarities, indices  
 
-
-#item-item collaborative filtering
-def S1(train, test, mode):
-    itemFilter = test.copy()
-    sim_matrix = calculate_simMatrix(train, mode)
-    for row,k in test.iterrows(): 
-       for column in test.columns: 
+#This function predicts the rating for specified user-item combination based on item-based approach
+def predict_itembased(train, item_id, user_id, similarity_matrix, neighbors, mode, mean, counts):
+    prediction = product = sum_p = sum_c = no_rates = 0
+    similarities, indices = find_k_similar_items(item_id, similarity_matrix, neighbors)
+    #similarities, indices = find_kplus_similar_items(train, item_id, user_id, similarity_matrix, neighbors)
+    sum_s = np.sum(similarities)
+    for i in range(0, len(indices)):
+        #if the item itself is in the similarities remove it
+        if indices[i] == item_id:
+            sum_s = sum_s - similarities[i]
+            continue
+        #we don't count ratings for movies that are NaN(user hasn't rated yet) even they are similiar
+        if np.isnan(train.loc[indices[i], user_id]):
+            no_rates += 1
+            sum_s = sum_s - similarities[i]
+            continue
+        if mode == 0:
+            product = train.loc[indices[i], user_id]
+        elif mode == 1:
+            product = train.loc[indices[i], user_id] * similarities[i] 
+        elif mode == 2:
+            #dictionary store keys in form (A,B),use try to catch the exception and reverse A,B
             try:
-               #find movies that are similar and the prediction rating is above 2,5 and store them             
-                if(test.loc[row,column] != 0):  
-                    prediction = predict_itembased(row, column, train, sim_matrix)
-                    if(prediction < 2.5):    
-                        itemFilter.at[row,column] = -1 # this item is irrelevant
-                        test.at[row,column] = 0
-                    else:
-                        print('Prediction',prediction)
-                        continue;       
-            except:
-                continue;      
-    print("\n\nSuccess S1!\n\n")         
-    return itemFilter
-
-#user-item collaborative filtering          
-def S2(train, itemFilter, test, mode):
-    final_data = test.copy()
-    sim_matrix = calculate_simMatrix(train.T, mode)
-    for row,k in test.iterrows(): 
-       for column in test.columns: 
-            try: 
-               #predict only for filtered movies from S1()
-               if(itemFilter.loc[row,column] != -1):
-                    #predict only for movies the user has not seen
-                    if(test.loc[row,column] != 0):
-                        prediction = predict_userbased(row, column, train, sim_matrix)
-                        if(prediction > 1):
-                            print('Prediction',prediction) 
-                        final_data.at[row,column] = prediction
-                
-            except:
-                continue;              
-    print("\n\nSuccess S2!\n\n")                   
-    return final_data
-
+                c = counts[(item_id, indices[i])]
+            except: 
+                c = counts[(indices[i], item_id,)]
+            product = train.loc[indices[i], user_id] * c
+            sum_c += c  
+        sum_p += product                                      
+    #in this case user has not rated any similiar movie, prediction becomes the mean of user's rating
+    if sum_p == 0 or sum_s == 0:
+        return round(mean[user_id], 1)
+    #prediction as average 
+    if mode == 0:
+        prediction = round((sum_p/(neighbors-no_rates)), 1)
+    #prediction as weighted average
+    elif mode == 1:
+        prediction = round((sum_p/sum_s), 1)
+    #prediction as weighted average and weights as user counts
+    elif mode == 2:
+        prediction = round((sum_p/sum_c), 1)
+    #normalize values
+    if prediction < 0.5: prediction = 0.5
+    elif prediction > 5: prediction = 5.0
+    return prediction
+            
 #Calculate mean absolute error and precision,recall 
-def calculateMetrics(true, pred):
+def calculate_metrics(true, pred):
+   print("Calculating metrics...") 
    ratings_true = []
    ratings_pred = []
    for row,k in true.iterrows(): 
        for column in true.columns: 
-           if(true.loc[row,column] != 0):
+           if not np.isnan(true.loc[row,column]) and not np.isnan(pred.loc[row,column]):
                ratings_true.append(true.loc[row,column])
                ratings_pred.append(pred.loc[row,column])
-
-   mae_score = mae(ratings_true, ratings_pred, multioutput='raw_values')
+           
+   mae_score = mae(ratings_true, ratings_pred)
    print('Mae: %.3f' % mae_score)
 
-   for i in range(len(ratings_pred)):
-      if ratings_pred[i] > 3 :
-        ratings_pred[i] = 1
-      else:
-        ratings_pred[i] = 0
-      if ratings_true[i] > 3 :
-        ratings_true[i] = 1
-      else:
-        ratings_true[i] = 0     
+   ratings_pred = [int(i>=3) for i in ratings_pred]
+   ratings_true = [int(i>=3) for i in ratings_true]
+   print('Precision: %.3f' % precision_score(ratings_true, ratings_pred))
+   print('Recall: %.3f' % recall_score(ratings_true, ratings_pred))
 
-   precision = precision_score(ratings_true, ratings_pred, average='binary')
-   print('Precision: %.3f' % precision)
- 
-   recall = recall_score(ratings_true, ratings_pred, average='binary')
-   print('Recall: %.3f' % recall)
-
-
-# %%
-train, test = data_init()
-train_filtered = S1(train, test, 2)
-final = S2(train, train_filtered, test, 2)
-calculateMetrics(test, final)
-
-#test.to_csv("C:/Users/Panos/Desktop/test.csv", sep='\t')
-#final.to_csv("C:/Users/Panos/Desktop/final.csv", sep='\t')
-
-
-# %%
-
-#This function predicts rating for specified user-item combination based on user-based approach
-def predict_userbased(user_id, item_id, ratingMatrix, simMatrix):
-    prediction = wtd_sum =0
-    similarities, indices=find_k_similar_items(user_id, simMatrix) #similar users based on cosine similarity
-    sum_wt = np.sum(similarities)-1
-    product = 1 
-    for i in range(0, len(indices)):
-        if indices[i] == user_id:
-            continue;
-        else:
-           #print( ratingMatrix.loc[indices[i],item_id] , similarities[i])
-            product = ratingMatrix.loc[indices[i],item_id] * similarities[i]
-            wtd_sum = wtd_sum + product
-    prediction = round((wtd_sum/sum_wt),1)
-    #print ('\nPredicted rating for user {0} -> item {1}: {2}\n'.format(user_id,item_id,prediction))
-    if prediction < 0:
-        prediction = 0
-    elif prediction > 5:
-        prediction = 5
-    return prediction
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+            print("Usage: <source> <path> <neighbors> <train-percentage>", file=sys.stderr)
+            sys.exit(-1)
+        
+    path = sys.argv[1]
+    neighbors = int(sys.argv[2])
+    percentage = float(sys.argv[3])
+    train, test,similarities, predictions, mean, counts = data_initialization(path, percentage)
+    print('Neighbors: ' + str(neighbors) + '\n' + 'Train split percentage: ' + str(percentage))
+    for mode in range(3):
+        print('Calculating prediction function ' + str(mode+1))
+        start_time = datetime.now()
+        for row,i in test.iterrows(): 
+            for column in test.columns:
+                try:         
+                    if not np.isnan(test.loc[row,column]) and column in train:
+                        predictions.at[row,column] = predict_itembased(train, row, column, similarities, neighbors, mode, mean, counts)     
+                except:
+                        continue; 
+        calculate_metrics(test, predictions)
+        end_time = datetime.now()
+        print('Duration: {}\n'.format(end_time - start_time))
 
 
-#This function predicts the rating for specified user-item combination based on item-based approach
-def predict_itembased(user_id, item_id, ratingMatrix,simMatrix):
-    prediction = wtd_sum =0
-    similarities, indices=find_k_similar_items(item_id, simMatrix) #similar users based on correlation coefficients
-    sum_wt = np.sum(similarities)-1
-    product = 1
-    for i in range(0, len(indices)):
-        if indices[i] == item_id:
-            continue;
-        else:
-            #print( ratingMatrix.loc[user_id,indices[i]], similarities[i])
-            product = ratingMatrix.loc[user_id,indices[i]] * (similarities[i])
-            wtd_sum = wtd_sum + product                                      
-    prediction = round((wtd_sum/sum_wt),1)
-    if prediction < 0:
-        prediction = 0
-    elif prediction >5:
-        prediction = 5
-    #print ('\nPredicted rating for user {0} -> item {1}: {2}'
-    #.format(user_id,item_id,prediction))     
-    return prediction
 
-# %%
